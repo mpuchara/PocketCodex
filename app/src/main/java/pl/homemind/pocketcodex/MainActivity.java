@@ -6,6 +6,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -24,11 +25,11 @@ import org.json.JSONObject;
 public class MainActivity extends Activity {
     private static final int REQ_PHOTOS = 1001;
     private static final int REQ_CAMERA = 1002;
+    private static final String DEFAULT_MODEL = "gpt-5.3-codex";
+    private static final String API_KEYS_URL = "https://platform.openai.com/api-keys";
 
     private TextView chat;
     private TextView status;
-    private EditText apiKeyField;
-    private EditText modelField;
     private EditText promptField;
     private Button sendButton;
     private ScrollView chatScroll;
@@ -47,65 +48,39 @@ public class MainActivity extends Activity {
         root.setPadding(dp(16), dp(14), dp(16), dp(14));
         root.setBackgroundColor(Color.WHITE);
 
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.VERTICAL);
+
         TextView title = new TextView(this);
         title.setText("PocketCodex");
         title.setTextSize(26);
         title.setTextColor(Color.BLACK);
         title.setTypeface(null, 1);
-        root.addView(title, matchWrap());
+        heading.addView(title, matchWrap());
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Agent Androida: model planuje, telefon wykonuje lokalnie po Twojej zgodzie.");
+        subtitle.setText("Powiedz, co telefon ma zrobić.");
         subtitle.setTextSize(14);
         subtitle.setTextColor(Color.DKGRAY);
-        subtitle.setPadding(0, dp(2), 0, dp(10));
-        root.addView(subtitle, matchWrap());
+        heading.addView(subtitle, matchWrap());
 
-        LinearLayout configRow = new LinearLayout(this);
-        configRow.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.addView(heading, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        modelField = new EditText(this);
-        modelField.setSingleLine(true);
-        modelField.setText(prefs.getString("model", "gpt-5.3-codex"));
-        modelField.setHint("model");
-        LinearLayout.LayoutParams modelParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
-        configRow.addView(modelField, modelParams);
-
-        Button permissions = new Button(this);
-        permissions.setText("Uprawnienia");
-        permissions.setOnClickListener(v -> showPermissionsMenu());
-        configRow.addView(permissions, new LinearLayout.LayoutParams(dp(130), dp(48)));
-        root.addView(configRow, matchWrap());
-
-        apiKeyField = new EditText(this);
-        apiKeyField.setHint("OpenAI API key — zapisywany tylko lokalnie na tym urządzeniu");
-        apiKeyField.setSingleLine(true);
-        apiKeyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        apiKeyField.setText(prefs.getString("api_key", ""));
-        root.addView(apiKeyField, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
-
-        LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-
-        Button save = new Button(this);
-        save.setText("Zapisz");
-        save.setOnClickListener(v -> saveConfig());
-        controls.addView(save, new LinearLayout.LayoutParams(0, dp(46), 1f));
-
-        Button reset = new Button(this);
-        reset.setText("Nowa rozmowa");
-        reset.setOnClickListener(v -> {
-            if (agent != null) agent.resetConversation();
-            chat.setText("");
-            append("System", "Rozpoczęto nową rozmowę.");
-        });
-        controls.addView(reset, new LinearLayout.LayoutParams(0, dp(46), 1f));
-        root.addView(controls, matchWrap());
+        Button settingsButton = new Button(this);
+        settingsButton.setText("Ustawienia");
+        settingsButton.setAllCaps(false);
+        settingsButton.setOnClickListener(v -> showAppSettings());
+        topBar.addView(settingsButton, new LinearLayout.LayoutParams(dp(115), dp(46)));
+        root.addView(topBar, matchWrap());
 
         status = new TextView(this);
-        status.setText("Gotowe");
+        status.setText(hasApiKey() ? "Gotowe" : "Wymaga połączenia z OpenAI");
         status.setTextColor(Color.GRAY);
-        status.setPadding(0, dp(8), 0, dp(6));
+        status.setPadding(0, dp(10), 0, dp(8));
         root.addView(status, matchWrap());
 
         chatScroll = new ScrollView(this);
@@ -114,63 +89,157 @@ public class MainActivity extends Activity {
         chat.setTextColor(Color.BLACK);
         chat.setTextIsSelectable(true);
         chat.setPadding(dp(12), dp(12), dp(12), dp(12));
-        chatScroll.addView(chat, new ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams chatParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
-        root.addView(chatScroll, chatParams);
+        chatScroll.addView(chat, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT,
+                ScrollView.LayoutParams.WRAP_CONTENT
+        ));
+        root.addView(chatScroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+        ));
 
         promptField = new EditText(this);
-        promptField.setHint("Np. „Ustaw jasność na 25% i włącz latarkę” albo „zrób czarno-białą kopię ostatniego zdjęcia”");
+        promptField.setHint("Np. „ustaw jasność na 25%” albo „zrób czarno-białą kopię ostatniego zdjęcia”");
         promptField.setMinLines(2);
         promptField.setMaxLines(5);
         promptField.setGravity(Gravity.TOP);
-        root.addView(promptField, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        root.addView(promptField, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
 
         sendButton = new Button(this);
         sendButton.setText("Wykonaj");
+        sendButton.setAllCaps(false);
         sendButton.setOnClickListener(v -> sendPrompt());
-        root.addView(sendButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+        root.addView(sendButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+        ));
 
         setContentView(root);
         rebuildAgent();
-        append("System", "MVP 0.1. Narzędzia zmieniające telefon wymagają każdorazowego potwierdzenia.");
+
+        if (hasApiKey()) {
+            append("PocketCodex", "Gotowe. Napisz, co mam zrobić na telefonie.");
+        } else {
+            root.post(this::showFirstRunSetup);
+        }
+    }
+
+    private boolean hasApiKey() {
+        return !prefs.getString("api_key", "").trim().isEmpty();
     }
 
     private void rebuildAgent() {
-        String key = apiKeyField == null ? prefs.getString("api_key", "") : apiKeyField.getText().toString();
-        String model = modelField == null ? prefs.getString("model", "gpt-5.3-codex") : modelField.getText().toString().trim();
-        if (model.isEmpty()) model = "gpt-5.3-codex";
-        agent = new AgentClient(tools, key, model);
+        agent = new AgentClient(tools, prefs.getString("api_key", ""), DEFAULT_MODEL);
     }
 
-    private void saveConfig() {
-        String model = modelField.getText().toString().trim();
-        if (model.isEmpty()) model = "gpt-5.3-codex";
-        prefs.edit()
-                .putString("api_key", apiKeyField.getText().toString().trim())
-                .putString("model", model)
-                .apply();
-        rebuildAgent();
-        Toast.makeText(this, "Konfiguracja zapisana lokalnie", Toast.LENGTH_SHORT).show();
+    private void showFirstRunSetup() {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(4), 0, dp(4), 0);
+
+        TextView explanation = new TextView(this);
+        explanation.setText("Jednorazowo wklej klucz OpenAI API. Potem aplikacja będzie otwierała się od razu jako agent telefonu. Klucz zostaje zapisany lokalnie na tym urządzeniu.");
+        explanation.setTextSize(15);
+        explanation.setTextColor(Color.DKGRAY);
+        explanation.setPadding(0, 0, 0, dp(12));
+        content.addView(explanation, matchWrap());
+
+        EditText keyField = new EditText(this);
+        keyField.setHint("Klucz OpenAI API");
+        keyField.setSingleLine(true);
+        keyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        keyField.setText(prefs.getString("api_key", ""));
+        content.addView(keyField, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+        ));
+
+        Button getKey = new Button(this);
+        getKey.setText("Otwórz stronę kluczy OpenAI");
+        getKey.setAllCaps(false);
+        getKey.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(API_KEYS_URL)));
+            } catch (Exception e) {
+                Toast.makeText(this, "Nie udało się otworzyć przeglądarki", Toast.LENGTH_SHORT).show();
+            }
+        });
+        content.addView(getKey, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(48)
+        ));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Połącz z OpenAI")
+                .setView(content)
+                .setPositiveButton("Zapisz i zacznij", null)
+                .setNegativeButton("Później", null)
+                .create();
+
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String key = keyField.getText().toString().trim();
+            if (key.isEmpty()) {
+                keyField.setError("Wklej klucz API");
+                return;
+            }
+            prefs.edit().putString("api_key", key).apply();
+            rebuildAgent();
+            status.setText("Gotowe");
+            if (chat.length() == 0) {
+                append("PocketCodex", "Gotowe. Napisz, co mam zrobić na telefonie.");
+            }
+            dialog.dismiss();
+        }));
+        dialog.show();
+    }
+
+    private void showAppSettings() {
+        String[] items = new String[]{
+                "Zmień klucz OpenAI",
+                "Uprawnienia telefonu",
+                "Nowa rozmowa",
+                "Informacje"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("PocketCodex")
+                .setItems(items, (dialog, which) -> {
+                    switch (which) {
+                        case 0:
+                            showFirstRunSetup();
+                            break;
+                        case 1:
+                            showPermissionsMenu();
+                            break;
+                        case 2:
+                            if (agent != null) agent.resetConversation();
+                            chat.setText("");
+                            append("PocketCodex", "Nowa rozmowa. Co mam zrobić?");
+                            break;
+                        default:
+                            new AlertDialog.Builder(this)
+                                    .setTitle("PocketCodex 0.2")
+                                    .setMessage("Model: GPT-5.3-Codex\nAkcje wykonuje lokalnie Android. Działania zmieniające urządzenie wymagają Twojego potwierdzenia.")
+                                    .setPositiveButton("OK", null)
+                                    .show();
+                            break;
+                    }
+                })
+                .show();
     }
 
     private void sendPrompt() {
         String prompt = promptField.getText().toString().trim();
         if (prompt.isEmpty()) return;
-        String key = apiKeyField.getText().toString().trim();
-        if (key.isEmpty()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Brak klucza API")
-                    .setMessage("Ten MVP używa OpenAI Responses API. Wpisz klucz API. Klucz nie jest wysyłany nigdzie poza api.openai.com.")
-                    .setPositiveButton("OK", null)
-                    .show();
+        if (!hasApiKey()) {
+            showFirstRunSetup();
             return;
         }
 
-        String model = modelField.getText().toString().trim();
-        if (model.isEmpty()) model = "gpt-5.3-codex";
-        agent.setApiKey(key);
-        agent.setModel(model);
-
+        rebuildAgentIfNeeded();
         append("Ty", prompt);
         promptField.setText("");
         sendButton.setEnabled(false);
@@ -183,7 +252,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onText(String text) {
-                runOnUiThread(() -> append("Codex", text));
+                runOnUiThread(() -> append("PocketCodex", text));
             }
 
             @Override
@@ -206,16 +275,61 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void rebuildAgentIfNeeded() {
+        if (agent == null) rebuildAgent();
+        agent.setApiKey(prefs.getString("api_key", ""));
+        agent.setModel(DEFAULT_MODEL);
+    }
+
     private void showApproval(String toolName, String arguments, AgentClient.ApprovalDecision decision) {
-        String prettyArgs = arguments;
-        try { prettyArgs = new JSONObject(arguments).toString(2); } catch (Exception ignored) {}
+        String description = friendlyAction(toolName, arguments);
         new AlertDialog.Builder(this)
-                .setTitle("Zezwolić na lokalną akcję?")
-                .setMessage("Narzędzie: " + toolName + "\n\n" + prettyArgs)
+                .setTitle("Pozwolić PocketCodex?")
+                .setMessage(description)
                 .setPositiveButton("Wykonaj", (d, w) -> decision.resolve(true))
-                .setNegativeButton("Odrzuć", (d, w) -> decision.resolve(false))
+                .setNegativeButton("Nie", (d, w) -> decision.resolve(false))
                 .setCancelable(false)
                 .show();
+    }
+
+    private String friendlyAction(String toolName, String arguments) {
+        try {
+            JSONObject args = new JSONObject(arguments == null ? "{}" : arguments);
+            switch (toolName) {
+                case "set_brightness":
+                    return "Ustawić jasność ekranu na " + args.optInt("percent") + "%?";
+                case "set_media_volume":
+                    return "Ustawić głośność multimediów na " + args.optInt("percent") + "%?";
+                case "set_flashlight":
+                    return args.optBoolean("enabled") ? "Włączyć latarkę?" : "Wyłączyć latarkę?";
+                case "open_settings":
+                    return "Otworzyć odpowiedni ekran ustawień telefonu?";
+                case "rotate_latest_photo":
+                    return "Utworzyć obróconą kopię ostatniego zdjęcia (" + args.optInt("degrees") + "°)?";
+                case "grayscale_latest_photo":
+                    return "Utworzyć czarno-białą kopię ostatniego zdjęcia?";
+                case "global_action":
+                    return "Wykonać akcję systemową: " + friendlyGlobalAction(args.optString("action")) + "?";
+                case "click_visible_text":
+                    return "Kliknąć na ekranie element „" + args.optString("text") + "”?";
+                default:
+                    return "Wykonać tę akcję na telefonie?";
+            }
+        } catch (Exception ignored) {
+            return "Wykonać tę akcję na telefonie?";
+        }
+    }
+
+    private String friendlyGlobalAction(String action) {
+        switch (action) {
+            case "back": return "Wstecz";
+            case "home": return "Ekran główny";
+            case "recents": return "Ostatnie aplikacje";
+            case "notifications": return "Powiadomienia";
+            case "quick_settings": return "Szybkie ustawienia";
+            case "screenshot": return "Zrzut ekranu";
+            default: return action;
+        }
     }
 
     private void showPermissionsMenu() {
@@ -223,18 +337,28 @@ public class MainActivity extends Activity {
                 "Zdjęcia",
                 "Aparat / latarka",
                 "Zmiana ustawień systemowych",
-                "Accessibility Service",
-                "Otwórz główne ustawienia"
+                "Sterowanie ekranem (Accessibility)",
+                "Główne ustawienia telefonu"
         };
         new AlertDialog.Builder(this)
-                .setTitle("Uprawnienia PocketCodex")
+                .setTitle("Uprawnienia telefonu")
                 .setItems(items, (dialog, which) -> {
                     switch (which) {
-                        case 0: requestPhotoPermission(); break;
-                        case 1: requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA); break;
-                        case 2: tools.settingsTools().openWriteSettingsPermission(); break;
-                        case 3: startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); break;
-                        default: startActivity(new Intent(Settings.ACTION_SETTINGS)); break;
+                        case 0:
+                            requestPhotoPermission();
+                            break;
+                        case 1:
+                            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
+                            break;
+                        case 2:
+                            tools.settingsTools().openWriteSettingsPermission();
+                            break;
+                        case 3:
+                            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                            break;
+                        default:
+                            startActivity(new Intent(Settings.ACTION_SETTINGS));
+                            break;
                     }
                 })
                 .show();
@@ -259,7 +383,10 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams matchWrap() {
-        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
     }
 
     private int dp(int value) {

@@ -74,6 +74,23 @@ public final class ToolRegistry {
         return tools;
     }
 
+    /** OpenAI-compatible tool schema used by OpenRouter Chat Completions. */
+    public JSONArray chatApiDefinitions() throws Exception {
+        JSONArray raw = apiDefinitions();
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < raw.length(); i++) {
+            JSONObject src = raw.getJSONObject(i);
+            JSONObject function = new JSONObject()
+                    .put("name", src.getString("name"))
+                    .put("description", src.optString("description", ""))
+                    .put("parameters", src.getJSONObject("parameters"));
+            out.put(new JSONObject()
+                    .put("type", "function")
+                    .put("function", function));
+        }
+        return out;
+    }
+
     public boolean requiresApproval(String name) {
         switch (name) {
             case "get_device_state":

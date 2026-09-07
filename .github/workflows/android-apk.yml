@@ -29,6 +29,10 @@ jobs:
       - name: Install Android SDK 35
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Restore stable debug signing key
+        run: |
+          base64 --decode .ci/pocketcodex-debug.keystore.b64 > app/pocketcodex-debug.keystore
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:

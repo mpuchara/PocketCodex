@@ -26,15 +26,22 @@ public final class AgentClient {
         void onFinished();
     }
 
-    private static final String ENDPOINT = "https://openrouter.ai/api/v1/responses";
+    private static final String ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
     private static final int MAX_TOOL_STEPS = 10;
     private static final int MAX_HTTP_ATTEMPTS = 3;
+    private static final String SYSTEM_PROMPT =
+            "Jesteś lokalnym agentem Androida o nazwie PocketCodex. Wykonuj operacje na urządzeniu wyłącznie przez dostępne narzędzia. " +
+            "Nie twierdź, że coś zostało wykonane, dopóki narzędzie nie zwróci powodzenia. " +
+            "Preferuj działania odwracalne. Przy zdjęciach edytory tworzą nową kopię zamiast nadpisywać oryginał. " +
+            "Jeśli brakuje uprawnień, wyjaśnij użytkownikowi krótko, jakiego uprawnienia potrzeba. " +
+            "Jeśli użytkownik prosi o zmianę względną, np. zmniejsz jasność o 10%, najpierw użyj get_device_state, oblicz nową wartość i dopiero potem użyj set_brightness. " +
+            "Odpowiadaj po polsku, krótko i konkretnie.";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final ToolRegistry tools;
     private String apiKey;
     private String model;
-    private String previousResponseId;
+    private JSONArray messages;
 
     public AgentClient(ToolRegistry tools, String apiKey, String model) {
         this.tools = tools;
@@ -51,20 +58,18 @@ public final class AgentClient {
     }
 
     public void resetConversation() {
-        previousResponseId = null;
+        messages = null;
     }
 
     public void send(String userText, Callback callback) {
         executor.execute(() -> {
             try {
+                ensureConversation();
+                messages.put(new JSONObject()
+                        .put("role", "user")
+                        .put("content", userText));
                 callback.onStatus("Pytam darmowe AI…");
-                JSONObject body = baseBody();
-                body.put("input", userText);
-                if (previousResponseId != null) {
-                    body.put("previous_response_id", previousResponseId);
-                }
-                JSONObject response = post(body);
-                handleResponse(response, 0, callback);
+                runModelLoop(0, callback);
             } catch (Exception e) {
                 callback.onError(readableError(e));
                 callback.onFinished();
@@ -72,129 +77,123 @@ public final class AgentClient {
         });
     }
 
-    private JSONObject baseBody() throws Exception {
-        JSONObject body = new JSONObject();
-        body.put("model", model);
-        body.put("parallel_tool_calls", false);
-        body.put("instructions",
-                "Jesteś lokalnym agentem Androida o nazwie PocketCodex. Wykonuj operacje na urządzeniu wyłącznie przez dostępne narzędzia. " +
-                "Nie twierdź, że coś zostało wykonane, dopóki narzędzie nie zwróci powodzenia. " +
-                "Preferuj działania odwracalne. Przy zdjęciach edytory tworzą nową kopię zamiast nadpisywać oryginał. " +
-                "Jeśli brakuje uprawnień, wyjaśnij użytkownikowi krótko, jakiego uprawnienia potrzeba. " +
-                "Jeśli użytkownik prosi o zmianę względną, np. zmniejsz jasność o 10%, najpierw odczytaj stan urządzenia. " +
-                "Odpowiadaj po polsku, krótko i konkretnie.");
-        body.put("tools", tools.apiDefinitions());
-        return body;
+    private void ensureConversation() throws Exception {
+        if (messages != null) return;
+        messages = new JSONArray();
+        messages.put(new JSONObject()
+                .put("role", "system")
+                .put("content", SYSTEM_PROMPT));
     }
 
-    private void handleResponse(JSONObject response, int toolStep, Callback callback) throws Exception {
-        String responseId = response.optString("id", null);
-        if (responseId == null) {
-            throw new IllegalStateException("Darmowy model nie zwrócił identyfikatora odpowiedzi.");
-        }
+    private JSONObject baseBody() throws Exception {
+        return new JSONObject()
+                .put("model", model)
+                .put("messages", messages)
+                .put("tools", tools.chatApiDefinitions())
+                .put("tool_choice", "auto")
+                .put("parallel_tool_calls", false);
+    }
 
-        JSONArray output = response.optJSONArray("output");
-        if (output == null) {
-            String directText = response.optString("output_text", "");
-            if (!directText.isEmpty()) {
-                callback.onText(directText);
-                previousResponseId = responseId;
-                callback.onStatus("Gotowe");
-                callback.onFinished();
-                return;
-            }
-            throw new IllegalStateException("Darmowy model zwrócił nieoczekiwany format odpowiedzi.");
-        }
-
-        JSONObject functionCall = null;
-        StringBuilder visibleText = new StringBuilder();
-
-        for (int i = 0; i < output.length(); i++) {
-            JSONObject item = output.optJSONObject(i);
-            if (item == null) continue;
-            String type = item.optString("type", "");
-            if ("function_call".equals(type) && functionCall == null) {
-                functionCall = item;
-            } else if ("message".equals(type)) {
-                JSONArray content = item.optJSONArray("content");
-                if (content == null) continue;
-                for (int j = 0; j < content.length(); j++) {
-                    JSONObject part = content.optJSONObject(j);
-                    if (part != null && "output_text".equals(part.optString("type"))) {
-                        if (visibleText.length() > 0) visibleText.append('\n');
-                        visibleText.append(part.optString("text", ""));
-                    }
-                }
-            }
-        }
-
-        if (visibleText.length() > 0) {
-            callback.onText(visibleText.toString());
-        }
-
-        if (functionCall == null) {
-            previousResponseId = responseId;
-            callback.onStatus("Gotowe");
-            callback.onFinished();
-            return;
-        }
-
-        if (toolStep >= MAX_TOOL_STEPS) {
-            previousResponseId = responseId;
+    private void runModelLoop(int toolStep, Callback callback) throws Exception {
+        if (toolStep > MAX_TOOL_STEPS) {
             callback.onError("Przerwałem po " + MAX_TOOL_STEPS + " krokach, żeby uniknąć pętli.");
             callback.onFinished();
             return;
         }
 
-        String callId = functionCall.optString("call_id", null);
-        String name = functionCall.optString("name", null);
-        String arguments = functionCall.optString("arguments", "{}");
-        if (callId == null || name == null) {
+        JSONObject response = post(baseBody());
+        JSONArray choices = response.optJSONArray("choices");
+        if (choices == null || choices.length() == 0) {
+            throw new IllegalStateException("Darmowy model nie zwrócił odpowiedzi.");
+        }
+
+        JSONObject choice = choices.optJSONObject(0);
+        JSONObject message = choice == null ? null : choice.optJSONObject("message");
+        if (message == null) {
+            throw new IllegalStateException("Darmowy model zwrócił nieoczekiwany format odpowiedzi.");
+        }
+
+        String visibleText = extractContent(message.opt("content"));
+        JSONArray toolCalls = message.optJSONArray("tool_calls");
+
+        if (toolCalls == null || toolCalls.length() == 0) {
+            messages.put(copyAssistantMessage(message, null));
+            if (!visibleText.isEmpty()) callback.onText(visibleText);
+            callback.onStatus("Gotowe");
+            callback.onFinished();
+            return;
+        }
+
+        if (!visibleText.isEmpty()) callback.onText(visibleText);
+        messages.put(copyAssistantMessage(message, toolCalls));
+        processToolCalls(toolCalls, 0, toolStep, callback);
+    }
+
+    private JSONObject copyAssistantMessage(JSONObject source, JSONArray toolCalls) throws Exception {
+        JSONObject out = new JSONObject().put("role", "assistant");
+        Object content = source.opt("content");
+        if (content == null || content == JSONObject.NULL) out.put("content", JSONObject.NULL);
+        else out.put("content", content);
+        if (toolCalls != null && toolCalls.length() > 0) out.put("tool_calls", toolCalls);
+        return out;
+    }
+
+    private void processToolCalls(JSONArray toolCalls, int index, int toolStep, Callback callback) throws Exception {
+        if (index >= toolCalls.length()) {
+            callback.onStatus("Sprawdzam wynik…");
+            runModelLoop(toolStep + 1, callback);
+            return;
+        }
+
+        JSONObject call = toolCalls.optJSONObject(index);
+        if (call == null) {
+            processToolCalls(toolCalls, index + 1, toolStep, callback);
+            return;
+        }
+
+        String callId = call.optString("id", "");
+        JSONObject function = call.optJSONObject("function");
+        String name = function == null ? "" : function.optString("name", "");
+        String arguments = function == null ? "{}" : function.optString("arguments", "{}");
+        if (callId.isEmpty() || name.isEmpty()) {
             throw new IllegalStateException("Model zwrócił niepełną akcję.");
         }
 
         callback.onStatus("Przygotowuję akcję…");
 
         if (tools.requiresApproval(name)) {
-            String currentResponseId = responseId;
             callback.onApprovalRequired(name, arguments, approved -> executor.execute(() -> {
                 try {
-                    String toolResult;
+                    String result;
                     if (approved) {
                         callback.onStatus("Wykonuję na telefonie…");
-                        toolResult = tools.execute(name, arguments);
+                        result = tools.execute(name, arguments);
                     } else {
-                        toolResult = new JSONObject()
+                        result = new JSONObject()
                                 .put("ok", false)
                                 .put("error", "Użytkownik odrzucił wykonanie tej operacji.")
                                 .toString();
                     }
-                    continueAfterTool(currentResponseId, callId, toolResult, toolStep + 1, callback);
+                    appendToolResult(callId, result);
+                    processToolCalls(toolCalls, index + 1, toolStep, callback);
                 } catch (Exception e) {
                     callback.onError(readableError(e));
                     callback.onFinished();
                 }
             }));
         } else {
-            String toolResult = tools.execute(name, arguments);
-            continueAfterTool(responseId, callId, toolResult, toolStep + 1, callback);
+            callback.onStatus("Odczytuję stan telefonu…");
+            String result = tools.execute(name, arguments);
+            appendToolResult(callId, result);
+            processToolCalls(toolCalls, index + 1, toolStep, callback);
         }
     }
 
-    private void continueAfterTool(String parentResponseId, String callId, String toolResult,
-                                   int toolStep, Callback callback) throws Exception {
-        JSONObject body = baseBody();
-        body.put("previous_response_id", parentResponseId);
-
-        JSONArray input = new JSONArray();
-        input.put(new JSONObject()
-                .put("type", "function_call_output")
-                .put("call_id", callId)
-                .put("output", toolResult));
-        body.put("input", input);
-
-        JSONObject response = post(body);
-        handleResponse(response, toolStep, callback);
+    private void appendToolResult(String callId, String result) throws Exception {
+        messages.put(new JSONObject()
+                .put("role", "tool")
+                .put("tool_call_id", callId)
+                .put("content", result));
     }
 
     private JSONObject post(JSONObject body) throws Exception {
@@ -245,6 +244,9 @@ public final class AgentClient {
                 if (code == 402) {
                     throw new IllegalStateException("OpenRouter odrzucił żądanie rozliczeniowe. PocketCodex używa modelu openrouter/free — spróbuj ponownie lub połącz konto ponownie.");
                 }
+                if (code == 404 && message.toLowerCase().contains("tool")) {
+                    throw new IllegalStateException("Darmowy model chwilowo nie obsługuje akcji telefonu. Spróbuj ponownie — OpenRouter wybierze inny model.");
+                }
                 throw new IllegalStateException("OpenRouter HTTP " + code + ": " + message);
             } catch (IllegalStateException e) {
                 throw e;
@@ -261,6 +263,26 @@ public final class AgentClient {
 
         if (last != null) throw last;
         throw new IllegalStateException("Nie udało się połączyć z darmowym AI.");
+    }
+
+    private static String extractContent(Object content) {
+        if (content == null || content == JSONObject.NULL) return "";
+        if (content instanceof String) return ((String) content).trim();
+        if (content instanceof JSONArray) {
+            JSONArray parts = (JSONArray) content;
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < parts.length(); i++) {
+                JSONObject part = parts.optJSONObject(i);
+                if (part == null) continue;
+                String text = part.optString("text", "");
+                if (!text.isEmpty()) {
+                    if (out.length() > 0) out.append('\n');
+                    out.append(text);
+                }
+            }
+            return out.toString().trim();
+        }
+        return String.valueOf(content).trim();
     }
 
     private static String extractError(String text) {

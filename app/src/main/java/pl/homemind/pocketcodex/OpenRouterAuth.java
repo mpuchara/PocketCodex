@@ -11,6 +11,7 @@ import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
@@ -41,12 +42,14 @@ public final class OpenRouterAuth {
     private final Activity activity;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile ServerSocket activeServer;
+    private volatile boolean cancelled;
 
     public OpenRouterAuth(Activity activity) {
         this.activity = activity;
     }
 
     public void start(Callback callback) {
+        cancelled = false;
         executor.execute(() -> {
             ServerSocket server = null;
             try {
@@ -75,11 +78,13 @@ public final class OpenRouterAuth {
                     try {
                         activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)));
                     } catch (Exception e) {
+                        cancel();
                         callback.onError("Nie udało się otworzyć przeglądarki.");
                     }
                 });
 
                 try (Socket socket = server.accept()) {
+                    if (cancelled) return;
                     socket.setSoTimeout(15_000);
                     BufferedReader reader = new BufferedReader(
                             new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8)
@@ -102,6 +107,11 @@ public final class OpenRouterAuth {
                     }
 
                     URI callback = URI.create("http://127.0.0.1" + parts[1]);
+                    if (!"/callback".equals(callback.getPath())) {
+                        writeBrowserResponse(socket, false, "Nieprawidłowa odpowiedź logowania.");
+                        throw new IllegalStateException("Nieprawidłowa ścieżka callback OpenRouter.");
+                    }
+
                     String returnedState = queryParam(callback.getRawQuery(), "state");
                     String code = queryParam(callback.getRawQuery(), "code");
                     String error = queryParam(callback.getRawQuery(), "error");
@@ -122,13 +132,15 @@ public final class OpenRouterAuth {
                     writeBrowserResponse(socket, true, "PocketCodex został połączony. Możesz wrócić do aplikacji.");
                     callback.onStatus("Kończę połączenie z darmowym AI…");
                     String apiKey = exchangeCode(code, verifier);
-                    callback.onSuccess(apiKey);
+                    if (!cancelled) callback.onSuccess(apiKey);
                 }
             } catch (java.net.SocketTimeoutException e) {
-                callback.onError("Logowanie wygasło. Spróbuj połączyć OpenRouter jeszcze raz.");
+                if (!cancelled) callback.onError("Logowanie wygasło. Spróbuj połączyć OpenRouter jeszcze raz.");
             } catch (Exception e) {
-                String message = e.getMessage();
-                callback.onError(message == null || message.isEmpty() ? e.getClass().getSimpleName() : message);
+                if (!cancelled) {
+                    String message = e.getMessage();
+                    callback.onError(message == null || message.isEmpty() ? e.getClass().getSimpleName() : message);
+                }
             } finally {
                 activeServer = null;
                 if (server != null) {
@@ -139,6 +151,7 @@ public final class OpenRouterAuth {
     }
 
     public void cancel() {
+        cancelled = true;
         ServerSocket server = activeServer;
         if (server != null) {
             try { server.close(); } catch (Exception ignored) {}
@@ -200,7 +213,10 @@ public final class OpenRouterAuth {
                     + "<div style=\"font-size:52px\">" + symbol + "</div><h2>" + title + "</h2><p>" + message + "</p>"
                     + "<p>Możesz zamknąć tę kartę.</p></body></html>";
             byte[] body = html.getBytes(StandardCharsets.UTF_8);
-            PrintWriter headers = new PrintWriter(socket.getOutputStream(), false, StandardCharsets.UTF_8);
+            PrintWriter headers = new PrintWriter(
+                    new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8),
+                    false
+            );
             headers.print("HTTP/1.1 200 OK\r\n");
             headers.print("Content-Type: text/html; charset=utf-8\r\n");
             headers.print("Content-Length: " + body.length + "\r\n");

@@ -106,15 +106,15 @@ public final class OpenRouterAuth {
                         throw new IllegalStateException("Nieprawidłowy callback OpenRouter.");
                     }
 
-                    URI callback = URI.create("http://127.0.0.1" + parts[1]);
-                    if (!"/callback".equals(callback.getPath())) {
+                    URI callbackUri = URI.create("http://127.0.0.1" + parts[1]);
+                    if (!"/callback".equals(callbackUri.getPath())) {
                         writeBrowserResponse(socket, false, "Nieprawidłowa odpowiedź logowania.");
                         throw new IllegalStateException("Nieprawidłowa ścieżka callback OpenRouter.");
                     }
 
-                    String returnedState = queryParam(callback.getRawQuery(), "state");
-                    String code = queryParam(callback.getRawQuery(), "code");
-                    String error = queryParam(callback.getRawQuery(), "error");
+                    String returnedState = queryParam(callbackUri.getRawQuery(), "state");
+                    String code = queryParam(callbackUri.getRawQuery(), "code");
+                    String error = queryParam(callbackUri.getRawQuery(), "error");
 
                     if (!state.equals(returnedState)) {
                         writeBrowserResponse(socket, false, "Logowanie zostało odrzucone ze względów bezpieczeństwa.");

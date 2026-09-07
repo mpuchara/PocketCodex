@@ -100,18 +100,36 @@ public final class SettingsTools {
     }
 
     public String openSettings(String panel) throws Exception {
-        String action;
+        Intent intent;
         switch (panel) {
-            case "wifi": action = Settings.ACTION_WIFI_SETTINGS; break;
-            case "bluetooth": action = Settings.ACTION_BLUETOOTH_SETTINGS; break;
-            case "display": action = Settings.ACTION_DISPLAY_SETTINGS; break;
-            case "sound": action = Settings.ACTION_SOUND_SETTINGS; break;
-            case "apps": action = Settings.ACTION_APPLICATION_SETTINGS; break;
-            case "accessibility": action = Settings.ACTION_ACCESSIBILITY_SETTINGS; break;
-            case "notifications": action = Settings.ACTION_NOTIFICATION_SETTINGS; break;
-            default: action = Settings.ACTION_SETTINGS; break;
+            case "wifi":
+                intent = new Intent(Settings.ACTION_WIFI_SETTINGS);
+                break;
+            case "bluetooth":
+                intent = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS);
+                break;
+            case "display":
+                intent = new Intent(Settings.ACTION_DISPLAY_SETTINGS);
+                break;
+            case "sound":
+                intent = new Intent(Settings.ACTION_SOUND_SETTINGS);
+                break;
+            case "apps":
+                intent = new Intent(Settings.ACTION_APPLICATION_SETTINGS);
+                break;
+            case "accessibility":
+                intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                break;
+            case "notifications":
+                intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                intent.putExtra(Settings.EXTRA_APP_PACKAGE, activity.getPackageName());
+                break;
+            default:
+                intent = new Intent(Settings.ACTION_SETTINGS);
+                break;
         }
-        activity.runOnUiThread(() -> activity.startActivity(new Intent(action)));
+        final Intent launchIntent = intent;
+        activity.runOnUiThread(() -> activity.startActivity(launchIntent));
         return new JSONObject().put("ok", true).put("opened", panel).toString();
     }
 

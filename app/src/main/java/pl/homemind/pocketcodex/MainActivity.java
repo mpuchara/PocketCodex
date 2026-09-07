@@ -6,11 +6,9 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -25,8 +23,8 @@ import org.json.JSONObject;
 public class MainActivity extends Activity {
     private static final int REQ_PHOTOS = 1001;
     private static final int REQ_CAMERA = 1002;
-    private static final String DEFAULT_MODEL = "gpt-5.3-codex";
-    private static final String API_KEYS_URL = "https://platform.openai.com/api-keys";
+    private static final String DEFAULT_MODEL = "openrouter/free";
+    private static final String PREF_OPENROUTER_KEY = "openrouter_api_key";
 
     private TextView chat;
     private TextView status;
@@ -35,6 +33,7 @@ public class MainActivity extends Activity {
     private ScrollView chatScroll;
     private ToolRegistry tools;
     private AgentClient agent;
+    private OpenRouterAuth openRouterAuth;
     private SharedPreferences prefs;
 
     @Override
@@ -42,6 +41,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("pocket_codex", MODE_PRIVATE);
         tools = new ToolRegistry(this);
+        openRouterAuth = new OpenRouterAuth(this);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -78,7 +78,7 @@ public class MainActivity extends Activity {
         root.addView(topBar, matchWrap());
 
         status = new TextView(this);
-        status.setText(hasApiKey() ? "Gotowe" : "Wymaga połączenia z OpenAI");
+        status.setText(hasAiConnection() ? "Gotowe" : "Połącz darmowe AI");
         status.setTextColor(Color.GRAY);
         status.setPadding(0, dp(10), 0, dp(8));
         root.addView(status, matchWrap());
@@ -100,7 +100,7 @@ public class MainActivity extends Activity {
         ));
 
         promptField = new EditText(this);
-        promptField.setHint("Np. „ustaw jasność na 25%” albo „zrób czarno-białą kopię ostatniego zdjęcia”");
+        promptField.setHint("Np. „zmniejsz jasność o 10%” albo „zrób czarno-białą kopię ostatniego zdjęcia”");
         promptField.setMinLines(2);
         promptField.setMaxLines(5);
         promptField.setGravity(Gravity.TOP);
@@ -121,87 +121,92 @@ public class MainActivity extends Activity {
         setContentView(root);
         rebuildAgent();
 
-        if (hasApiKey()) {
+        if (hasAiConnection()) {
             append("PocketCodex", "Gotowe. Napisz, co mam zrobić na telefonie.");
         } else {
             root.post(this::showFirstRunSetup);
         }
     }
 
-    private boolean hasApiKey() {
-        return !prefs.getString("api_key", "").trim().isEmpty();
+    private boolean hasAiConnection() {
+        return !prefs.getString(PREF_OPENROUTER_KEY, "").trim().isEmpty();
     }
 
     private void rebuildAgent() {
-        agent = new AgentClient(tools, prefs.getString("api_key", ""), DEFAULT_MODEL);
+        agent = new AgentClient(
+                tools,
+                prefs.getString(PREF_OPENROUTER_KEY, ""),
+                DEFAULT_MODEL
+        );
     }
 
     private void showFirstRunSetup() {
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(4), 0, dp(4), 0);
+        new AlertDialog.Builder(this)
+                .setTitle("Połącz darmowe AI")
+                .setMessage(
+                        "PocketCodex korzysta z darmowych modeli online przez OpenRouter. " +
+                        "Nie musisz tworzyć ani kopiować żadnego klucza API.\n\n" +
+                        "Po kliknięciu otworzy się przeglądarka. Zaloguj się lub utwórz konto OpenRouter i zaakceptuj połączenie. " +
+                        "Po autoryzacji PocketCodex połączy się automatycznie."
+                )
+                .setPositiveButton("Połącz", (dialog, which) -> startOpenRouterLogin())
+                .setNegativeButton("Później", null)
+                .show();
+    }
 
-        TextView explanation = new TextView(this);
-        explanation.setText("Jednorazowo wklej klucz OpenAI API. Potem aplikacja będzie otwierała się od razu jako agent telefonu. Klucz zostaje zapisany lokalnie na tym urządzeniu.");
-        explanation.setTextSize(15);
-        explanation.setTextColor(Color.DKGRAY);
-        explanation.setPadding(0, 0, 0, dp(12));
-        content.addView(explanation, matchWrap());
+    private void startOpenRouterLogin() {
+        status.setText("Otwieram OpenRouter…");
+        Toast.makeText(this, "Po autoryzacji połączenie dokończy się automatycznie", Toast.LENGTH_LONG).show();
 
-        EditText keyField = new EditText(this);
-        keyField.setHint("Klucz OpenAI API");
-        keyField.setSingleLine(true);
-        keyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        keyField.setText(prefs.getString("api_key", ""));
-        content.addView(keyField, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(52)
-        ));
+        openRouterAuth.cancel();
+        openRouterAuth = new OpenRouterAuth(this);
+        openRouterAuth.start(new OpenRouterAuth.Callback() {
+            @Override
+            public void onStatus(String value) {
+                runOnUiThread(() -> status.setText(value));
+            }
 
-        Button getKey = new Button(this);
-        getKey.setText("Otwórz stronę kluczy OpenAI");
-        getKey.setAllCaps(false);
-        getKey.setOnClickListener(v -> {
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(API_KEYS_URL)));
-            } catch (Exception e) {
-                Toast.makeText(this, "Nie udało się otworzyć przeglądarki", Toast.LENGTH_SHORT).show();
+            @Override
+            public void onSuccess(String apiKey) {
+                runOnUiThread(() -> {
+                    prefs.edit()
+                            .putString(PREF_OPENROUTER_KEY, apiKey)
+                            .remove("api_key")
+                            .remove("model")
+                            .apply();
+                    rebuildAgent();
+                    status.setText("Gotowe");
+                    if (chat.length() == 0) {
+                        append("PocketCodex", "Połączono z darmowym AI. Napisz, co mam zrobić na telefonie.");
+                    } else {
+                        append("PocketCodex", "Połączono z darmowym AI.");
+                    }
+                    Toast.makeText(MainActivity.this, "Darmowe AI połączone", Toast.LENGTH_SHORT).show();
+                });
+            }
+
+            @Override
+            public void onError(String error) {
+                runOnUiThread(() -> {
+                    status.setText(hasAiConnection() ? "Gotowe" : "Nie połączono");
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Nie udało się połączyć")
+                            .setMessage(error)
+                            .setPositiveButton("Spróbuj ponownie", (d, w) -> startOpenRouterLogin())
+                            .setNegativeButton("Później", null)
+                            .show();
+                });
             }
         });
-        content.addView(getKey, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(48)
-        ));
-
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Połącz z OpenAI")
-                .setView(content)
-                .setPositiveButton("Zapisz i zacznij", null)
-                .setNegativeButton("Później", null)
-                .create();
-
-        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            String key = keyField.getText().toString().trim();
-            if (key.isEmpty()) {
-                keyField.setError("Wklej klucz API");
-                return;
-            }
-            prefs.edit().putString("api_key", key).apply();
-            rebuildAgent();
-            status.setText("Gotowe");
-            if (chat.length() == 0) {
-                append("PocketCodex", "Gotowe. Napisz, co mam zrobić na telefonie.");
-            }
-            dialog.dismiss();
-        }));
-        dialog.show();
     }
 
     private void showAppSettings() {
+        String connectionLabel = hasAiConnection() ? "Zmień konto darmowego AI" : "Połącz darmowe AI";
         String[] items = new String[]{
-                "Zmień klucz OpenAI",
+                connectionLabel,
                 "Uprawnienia telefonu",
                 "Nowa rozmowa",
+                "Rozłącz darmowe AI",
                 "Informacje"
         };
         new AlertDialog.Builder(this)
@@ -209,7 +214,7 @@ public class MainActivity extends Activity {
                 .setItems(items, (dialog, which) -> {
                     switch (which) {
                         case 0:
-                            showFirstRunSetup();
+                            startOpenRouterLogin();
                             break;
                         case 1:
                             showPermissionsMenu();
@@ -219,22 +224,53 @@ public class MainActivity extends Activity {
                             chat.setText("");
                             append("PocketCodex", "Nowa rozmowa. Co mam zrobić?");
                             break;
+                        case 3:
+                            disconnectOpenRouter();
+                            break;
                         default:
-                            new AlertDialog.Builder(this)
-                                    .setTitle("PocketCodex 0.2")
-                                    .setMessage("Model: GPT-5.3-Codex\nAkcje wykonuje lokalnie Android. Działania zmieniające urządzenie wymagają Twojego potwierdzenia.")
-                                    .setPositiveButton("OK", null)
-                                    .show();
+                            showInfo();
                             break;
                     }
                 })
                 .show();
     }
 
+    private void disconnectOpenRouter() {
+        if (!hasAiConnection()) {
+            Toast.makeText(this, "Darmowe AI nie jest połączone", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Rozłączyć darmowe AI?")
+                .setMessage("PocketCodex usunie lokalny klucz dostępu OpenRouter z telefonu.")
+                .setPositiveButton("Rozłącz", (d, w) -> {
+                    prefs.edit().remove(PREF_OPENROUTER_KEY).apply();
+                    if (agent != null) agent.resetConversation();
+                    rebuildAgent();
+                    status.setText("Połącz darmowe AI");
+                    append("PocketCodex", "Darmowe AI zostało rozłączone.");
+                })
+                .setNegativeButton("Anuluj", null)
+                .show();
+    }
+
+    private void showInfo() {
+        new AlertDialog.Builder(this)
+                .setTitle("PocketCodex 0.3")
+                .setMessage(
+                        "AI: OpenRouter Free (dynamiczny wybór darmowego modelu)\n\n" +
+                        "Model planuje online, ale akcje na telefonie wykonuje lokalnie PocketCodex. " +
+                        "Działania zmieniające urządzenie wymagają Twojego potwierdzenia.\n\n" +
+                        "Skład darmowych modeli może zmieniać się automatycznie."
+                )
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
     private void sendPrompt() {
         String prompt = promptField.getText().toString().trim();
         if (prompt.isEmpty()) return;
-        if (!hasApiKey()) {
+        if (!hasAiConnection()) {
             showFirstRunSetup();
             return;
         }
@@ -277,7 +313,7 @@ public class MainActivity extends Activity {
 
     private void rebuildAgentIfNeeded() {
         if (agent == null) rebuildAgent();
-        agent.setApiKey(prefs.getString("api_key", ""));
+        agent.setApiKey(prefs.getString(PREF_OPENROUTER_KEY, ""));
         agent.setModel(DEFAULT_MODEL);
     }
 

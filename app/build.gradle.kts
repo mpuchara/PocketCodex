@@ -14,7 +14,19 @@ android {
         versionName = "0.3.1"
     }
 
+    signingConfigs {
+        create("pocketcodexDebug") {
+            storeFile = file("pocketcodex-debug.keystore")
+            storePassword = "pocketcodex"
+            keyAlias = "pocketcodex"
+            keyPassword = "pocketcodex"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("pocketcodexDebug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

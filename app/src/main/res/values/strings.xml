@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">PocketCodex</string>
+    <string name="accessibility_service_description">Pozwala PocketCodex wykonywać zatwierdzone działania na interfejsie Androida.</string>
+</resources>

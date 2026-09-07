@@ -26,8 +26,9 @@ public final class AgentClient {
         void onFinished();
     }
 
-    private static final String ENDPOINT = "https://api.openai.com/v1/responses";
+    private static final String ENDPOINT = "https://openrouter.ai/api/v1/responses";
     private static final int MAX_TOOL_STEPS = 10;
+    private static final int MAX_HTTP_ATTEMPTS = 3;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final ToolRegistry tools;
@@ -56,7 +57,7 @@ public final class AgentClient {
     public void send(String userText, Callback callback) {
         executor.execute(() -> {
             try {
-                callback.onStatus("Łączę z modelem…");
+                callback.onStatus("Pytam darmowe AI…");
                 JSONObject body = baseBody();
                 body.put("input", userText);
                 if (previousResponseId != null) {
@@ -76,10 +77,11 @@ public final class AgentClient {
         body.put("model", model);
         body.put("parallel_tool_calls", false);
         body.put("instructions",
-                "Jesteś lokalnym agentem Androida. Wykonuj operacje na urządzeniu wyłącznie przez dostępne narzędzia. " +
+                "Jesteś lokalnym agentem Androida o nazwie PocketCodex. Wykonuj operacje na urządzeniu wyłącznie przez dostępne narzędzia. " +
                 "Nie twierdź, że coś zostało wykonane, dopóki narzędzie nie zwróci powodzenia. " +
                 "Preferuj działania odwracalne. Przy zdjęciach edytory tworzą nową kopię zamiast nadpisywać oryginał. " +
-                "Jeśli brakuje uprawnień, wyjaśnij użytkownikowi dokładnie, jakiego uprawnienia potrzeba. " +
+                "Jeśli brakuje uprawnień, wyjaśnij użytkownikowi krótko, jakiego uprawnienia potrzeba. " +
+                "Jeśli użytkownik prosi o zmianę względną, np. zmniejsz jasność o 10%, najpierw odczytaj stan urządzenia. " +
                 "Odpowiadaj po polsku, krótko i konkretnie.");
         body.put("tools", tools.apiDefinitions());
         return body;
@@ -88,12 +90,20 @@ public final class AgentClient {
     private void handleResponse(JSONObject response, int toolStep, Callback callback) throws Exception {
         String responseId = response.optString("id", null);
         if (responseId == null) {
-            throw new IllegalStateException("Brak id odpowiedzi API.");
+            throw new IllegalStateException("Darmowy model nie zwrócił identyfikatora odpowiedzi.");
         }
 
         JSONArray output = response.optJSONArray("output");
         if (output == null) {
-            throw new IllegalStateException("Brak pola output w odpowiedzi API.");
+            String directText = response.optString("output_text", "");
+            if (!directText.isEmpty()) {
+                callback.onText(directText);
+                previousResponseId = responseId;
+                callback.onStatus("Gotowe");
+                callback.onFinished();
+                return;
+            }
+            throw new IllegalStateException("Darmowy model zwrócił nieoczekiwany format odpowiedzi.");
         }
 
         JSONObject functionCall = null;
@@ -131,7 +141,7 @@ public final class AgentClient {
 
         if (toolStep >= MAX_TOOL_STEPS) {
             previousResponseId = responseId;
-            callback.onError("Przerwałem po " + MAX_TOOL_STEPS + " krokach narzędzi, żeby uniknąć pętli.");
+            callback.onError("Przerwałem po " + MAX_TOOL_STEPS + " krokach, żeby uniknąć pętli.");
             callback.onFinished();
             return;
         }
@@ -140,10 +150,10 @@ public final class AgentClient {
         String name = functionCall.optString("name", null);
         String arguments = functionCall.optString("arguments", "{}");
         if (callId == null || name == null) {
-            throw new IllegalStateException("Niepełne wywołanie narzędzia.");
+            throw new IllegalStateException("Model zwrócił niepełną akcję.");
         }
 
-        callback.onStatus("Agent chce użyć: " + name);
+        callback.onStatus("Przygotowuję akcję…");
 
         if (tools.requiresApproval(name)) {
             String currentResponseId = responseId;
@@ -151,7 +161,7 @@ public final class AgentClient {
                 try {
                     String toolResult;
                     if (approved) {
-                        callback.onStatus("Wykonuję lokalnie: " + name);
+                        callback.onStatus("Wykonuję na telefonie…");
                         toolResult = tools.execute(name, arguments);
                     } else {
                         toolResult = new JSONObject()
@@ -189,37 +199,79 @@ public final class AgentClient {
 
     private JSONObject post(JSONObject body) throws Exception {
         if (apiKey == null || apiKey.trim().isEmpty()) {
-            throw new IllegalStateException("Brak klucza OpenAI API.");
+            throw new IllegalStateException("PocketCodex nie jest połączony z OpenRouter.");
         }
 
-        HttpURLConnection conn = (HttpURLConnection) new URL(ENDPOINT).openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(20_000);
-        conn.setReadTimeout(120_000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Authorization", "Bearer " + apiKey.trim());
-        conn.setRequestProperty("Content-Type", "application/json");
-
-        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(bytes);
-        }
-
-        int code = conn.getResponseCode();
-        InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
-        String text = readAll(stream);
-        conn.disconnect();
-
-        if (code < 200 || code >= 300) {
-            String message = text;
+        Exception last = null;
+        for (int attempt = 1; attempt <= MAX_HTTP_ATTEMPTS; attempt++) {
+            HttpURLConnection conn = null;
             try {
-                JSONObject errorJson = new JSONObject(text);
-                JSONObject error = errorJson.optJSONObject("error");
-                if (error != null) message = error.optString("message", text);
-            } catch (Exception ignored) {}
-            throw new IllegalStateException("OpenAI API HTTP " + code + ": " + message);
+                conn = (HttpURLConnection) new URL(ENDPOINT).openConnection();
+                conn.setRequestMethod("POST");
+                conn.setConnectTimeout(20_000);
+                conn.setReadTimeout(120_000);
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Authorization", "Bearer " + apiKey.trim());
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("HTTP-Referer", "https://github.com/mpuchara/PocketCodex");
+                conn.setRequestProperty("X-Title", "PocketCodex");
+
+                byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(bytes);
+                }
+
+                int code = conn.getResponseCode();
+                InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+                String text = readAll(stream);
+
+                if (code >= 200 && code < 300) {
+                    return new JSONObject(text);
+                }
+
+                String message = extractError(text);
+                boolean temporary = code == 408 || code == 429 || code == 502 || code == 503 || code == 524 || code == 529;
+                if (temporary && attempt < MAX_HTTP_ATTEMPTS) {
+                    Thread.sleep(700L * attempt);
+                    continue;
+                }
+
+                if (code == 429 || code == 529) {
+                    throw new IllegalStateException("Darmowe modele są teraz przeciążone. Spróbuj ponownie za chwilę.");
+                }
+                if (code == 401 || code == 403) {
+                    throw new IllegalStateException("Połączenie z OpenRouter wygasło. Wejdź w Ustawienia i połącz konto ponownie.");
+                }
+                if (code == 402) {
+                    throw new IllegalStateException("OpenRouter odrzucił żądanie rozliczeniowe. PocketCodex używa modelu openrouter/free — spróbuj ponownie lub połącz konto ponownie.");
+                }
+                throw new IllegalStateException("OpenRouter HTTP " + code + ": " + message);
+            } catch (IllegalStateException e) {
+                throw e;
+            } catch (Exception e) {
+                last = e;
+                if (attempt < MAX_HTTP_ATTEMPTS) {
+                    Thread.sleep(500L * attempt);
+                    continue;
+                }
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
         }
-        return new JSONObject(text);
+
+        if (last != null) throw last;
+        throw new IllegalStateException("Nie udało się połączyć z darmowym AI.");
+    }
+
+    private static String extractError(String text) {
+        String message = text;
+        try {
+            JSONObject errorJson = new JSONObject(text);
+            JSONObject error = errorJson.optJSONObject("error");
+            if (error != null) message = error.optString("message", text);
+            else message = errorJson.optString("message", text);
+        } catch (Exception ignored) {}
+        return message == null || message.isEmpty() ? "Nieznany błąd" : message;
     }
 
     private static String readAll(InputStream stream) throws Exception {
